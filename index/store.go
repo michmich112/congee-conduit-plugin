@@ -27,11 +27,16 @@ type Query struct {
 
 // Stats is Overview UI counts.
 type Stats struct {
-	Active            int64  `json:"active"`
-	Inactive          int64  `json:"inactive"`
-	Embeddings        int64  `json:"embeddings"`
-	EmbeddingMismatch int64  `json:"embedding_mismatch"`
-	Backend           string `json:"backend"`
+	Active                int64  `json:"active"`
+	Inactive              int64  `json:"inactive"`
+	Embeddings            int64  `json:"embeddings"`
+	EmbeddingMismatch     int64  `json:"embedding_mismatch"`
+	Backend               string `json:"backend"`
+	SearchTotal           uint64 `json:"search_total"`
+	SearchErrors          uint64 `json:"search_errors"`
+	SearchOver200ms       uint64 `json:"search_over_200ms"`
+	SearchSemantic        uint64 `json:"search_semantic"`
+	SearchLexicalFallback uint64 `json:"search_lexical_fallback"`
 }
 
 // ListQuery pages through stored listings or embeddings.

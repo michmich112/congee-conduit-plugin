@@ -99,6 +99,21 @@ func TestDecideKind1Passthrough(t *testing.T) {
 	}
 }
 
+func TestDecideLeavesUnsupportedNIP01FiltersToRelay(t *testing.T) {
+	st := defaultSettings()
+	cases := []sdk.Req{
+		{Filters: []sdk.Filter{{Kinds: []int{30402}, Search: "bike"}, {Kinds: []int{30402}, Search: "helmet"}}},
+		{Filters: []sdk.Filter{{Kinds: []int{30402}, Search: "bike", IDs: []string{"id"}}}},
+		{Filters: []sdk.Filter{{Kinds: []int{30402}, Search: "bike", Tags: map[string][]string{"t": {"cycling"}}}}},
+		{Filters: []sdk.Filter{{Kinds: []int{30402, 1}, Search: "bike"}}},
+	}
+	for i, req := range cases {
+		if got := decide(req, st, true).kind; got != decPassthrough {
+			t.Fatalf("case %d: %v", i, got)
+		}
+	}
+}
+
 func reqSearch() sdk.Req {
 	return sdk.Req{Filters: []sdk.Filter{{Kinds: []int{30402}, Search: "bike"}}}
 }
