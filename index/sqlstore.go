@@ -125,10 +125,8 @@ func execStatements(ctx context.Context, db *sql.DB, sqlText string) error {
 }
 
 func (s *sqlStore) runWrite(fn func() error) error {
-	if s.backend == "turso" {
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
-	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return fn()
 }
 
@@ -147,6 +145,14 @@ func (s *sqlStore) Ping(ctx context.Context) error {
 }
 
 func (s *sqlStore) Upsert(ctx context.Context, l listing.Listing) error {
+	return s.upsert(ctx, l, true)
+}
+
+func (s *sqlStore) ReplaceCanonical(ctx context.Context, l listing.Listing) error {
+	return s.upsert(ctx, l, false)
+}
+
+func (s *sqlStore) upsert(ctx context.Context, l listing.Listing, enforceOrder bool) error {
 	if l.IsDeletion {
 		return s.MarkInactive(ctx, l.PubKey, l.DeleteEventIDs, l.DeleteCoords)
 	}
@@ -157,14 +163,39 @@ func (s *sqlStore) Upsert(ctx context.Context, l listing.Listing) error {
 		var existingCreated int64
 		var existingID, existingHash, existingModel string
 		row := s.db.QueryRowContext(ctx, `SELECT created_at, event_id, text_hash FROM listings WHERE coord = `+s.ph(1), l.Coord)
-		_ = row.Scan(&existingCreated, &existingID, &existingHash)
-		if existingID != "" {
-			if l.CreatedAt < existingCreated || (l.CreatedAt == existingCreated && l.EventID < existingID) {
+		if err := row.Scan(&existingCreated, &existingID, &existingHash); err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if enforceOrder && existingID != "" {
+			// NIP-01 retains the lowest event ID when timestamps tie.
+			if l.CreatedAt < existingCreated || (l.CreatedAt == existingCreated && l.EventID > existingID) {
 				return nil
 			}
 		}
+		var vec []float32
+		if l.Status == listing.StatusActive && s.embedder != nil {
+			var existingDim int
+			if existingHash == l.TextHash {
+				var blob []byte
+				if err := s.db.QueryRowContext(ctx, `SELECT model, dim, vector FROM listing_embeddings WHERE coord = `+s.ph(1), l.Coord).Scan(&existingModel, &existingDim, &blob); err == nil && existingModel == s.embedder.ModelID() && existingDim == s.embedder.Dim() {
+					vec = bytesToFloats(blob)
+				}
+			}
+			if vec == nil {
+				var err error
+				vec, err = s.embedder.Embed(ctx, l.EmbedText())
+				if err != nil {
+					return err
+				}
+			}
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
 		now := nowUnix()
-		_, err := s.db.ExecContext(ctx, `INSERT INTO listings (coord, event_id, kind, pubkey, d_tag, stall_id, status, inactive_reason, title, body, text_hash, created_at, updated_at)
+		_, err = tx.ExecContext(ctx, `INSERT INTO listings (coord, event_id, kind, pubkey, d_tag, stall_id, status, inactive_reason, title, body, text_hash, created_at, updated_at)
 VALUES (`+placeholders(s, 13)+`)
 ON CONFLICT(coord) DO UPDATE SET
  event_id=excluded.event_id, kind=excluded.kind, pubkey=excluded.pubkey, d_tag=excluded.d_tag,
@@ -176,49 +207,34 @@ ON CONFLICT(coord) DO UPDATE SET
 		if err != nil {
 			return err
 		}
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM listing_geo WHERE coord = `+s.ph(1), l.Coord)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM listing_geo WHERE coord = `+s.ph(1), l.Coord); err != nil {
+			return err
+		}
 		if l.HasGeo {
-			_, err = s.db.ExecContext(ctx, `INSERT INTO listing_geo (coord, geohash, lat, lon) VALUES (`+placeholders(s, 4)+`)`,
+			_, err = tx.ExecContext(ctx, `INSERT INTO listing_geo (coord, geohash, lat, lon) VALUES (`+placeholders(s, 4)+`)`,
 				l.Coord, l.Geohash, l.Lat, l.Lon)
 			if err != nil {
 				return err
 			}
 		}
-		if l.Status != listing.StatusActive {
-			s.ann.Delete(l.Coord)
-			return nil
-		}
-		if s.embedder == nil {
-			return nil
-		}
-		skipEmbed := false
-		var existingDim int
-		if existingHash == l.TextHash {
-			err = s.db.QueryRowContext(ctx, `SELECT model, dim FROM listing_embeddings WHERE coord = `+s.ph(1), l.Coord).Scan(&existingModel, &existingDim)
-			if err == nil && existingModel == s.embedder.ModelID() && existingDim == s.embedder.Dim() {
-				skipEmbed = true
-			}
-		}
-		var vec []float32
-		if skipEmbed {
-			var blob []byte
-			if err := s.db.QueryRowContext(ctx, `SELECT vector FROM listing_embeddings WHERE coord = `+s.ph(1), l.Coord).Scan(&blob); err == nil {
-				vec = bytesToFloats(blob)
-			}
-		}
-		if vec == nil {
-			vec, err = s.embedder.Embed(ctx, l.EmbedText())
-			if err != nil {
-				return err
-			}
-			_, err = s.db.ExecContext(ctx, `INSERT INTO listing_embeddings (coord, model, dim, vector) VALUES (`+placeholders(s, 4)+`)
+		if l.Status == listing.StatusActive && vec != nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO listing_embeddings (coord, model, dim, vector) VALUES (`+placeholders(s, 4)+`)
 ON CONFLICT(coord) DO UPDATE SET model=excluded.model, dim=excluded.dim, vector=excluded.vector`,
 				l.Coord, s.embedder.ModelID(), s.embedder.Dim(), floatsToBytes(vec))
 			if err != nil {
 				return err
 			}
+		} else if _, err := tx.ExecContext(ctx, `DELETE FROM listing_embeddings WHERE coord = `+s.ph(1), l.Coord); err != nil {
+			return err
 		}
-		s.ann.Upsert(l.Coord, l.EventID, l.CreatedAt, vec)
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if l.Status == listing.StatusActive && vec != nil {
+			s.ann.Upsert(l.Coord, l.EventID, l.CreatedAt, vec)
+		} else {
+			s.ann.Delete(l.Coord)
+		}
 		return nil
 	})
 }
@@ -264,11 +280,96 @@ func (s *sqlStore) MarkInactive(ctx context.Context, pubkey string, eventIDs, co
 	})
 }
 
+func (s *sqlStore) DeleteCoord(ctx context.Context, coord string) error {
+	return s.runWrite(func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for _, table := range []string{"listing_embeddings", "listing_geo", "listings"} {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE coord = `+s.ph(1), coord); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		s.ann.Delete(coord)
+		return nil
+	})
+}
+
+func (s *sqlStore) CoordsForEventIDs(ctx context.Context, pubkey string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	phs := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	for i, id := range ids {
+		phs[i] = s.ph(i + 1)
+		args = append(args, id)
+	}
+	q := `SELECT coord FROM listings WHERE event_id IN (` + strings.Join(phs, ",") + `)`
+	if pubkey != "" {
+		q += ` AND pubkey = ` + s.ph(len(args)+1)
+		args = append(args, pubkey)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var coords []string
+	for rows.Next() {
+		var coord string
+		if err := rows.Scan(&coord); err != nil {
+			return nil, err
+		}
+		coords = append(coords, coord)
+	}
+	return coords, rows.Err()
+}
+
+func (s *sqlStore) CoordsAfter(ctx context.Context, after string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT coord FROM listings WHERE coord > `+s.ph(1)+` ORDER BY coord LIMIT `+s.ph(2), after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var coords []string
+	for rows.Next() {
+		var coord string
+		if err := rows.Scan(&coord); err != nil {
+			return nil, err
+		}
+		coords = append(coords, coord)
+	}
+	return coords, rows.Err()
+}
+
 func (s *sqlStore) markCoordInactive(ctx context.Context, coord string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE listings SET status = `+s.ph(1)+`, inactive_reason = `+s.ph(2)+`, updated_at = `+s.ph(3)+` WHERE coord = `+s.ph(4),
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `UPDATE listings SET status = `+s.ph(1)+`, inactive_reason = `+s.ph(2)+`, updated_at = `+s.ph(3)+` WHERE coord = `+s.ph(4),
 		listing.StatusInactive, listing.ReasonDeleted, nowUnix(), coord)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM listing_embeddings WHERE coord = `+s.ph(1), coord); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	s.ann.Delete(coord)
-	return err
+	return nil
 }
 
 func (s *sqlStore) Get(ctx context.Context, coord string) (listing.Listing, bool, error) {

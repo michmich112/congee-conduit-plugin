@@ -162,6 +162,15 @@ func searchSQL(ctx context.Context, s *sqlStore, q Query) ([]string, error) {
 		return nil, err
 	}
 	items := s.ann.Snapshot(coordSet)
+	// The SQL row is authoritative while an index update is between commit and
+	// refreshing the in-memory vector. Never return an old event ID from ANN.
+	current := items[:0]
+	for _, it := range items {
+		if row, ok := coordSet[it.Coord]; ok && row.EventID == it.EventID {
+			current = append(current, it)
+		}
+	}
+	items = current
 	if len(items) == 0 {
 		// no vectors yet; newest-first fallback
 		ids := make([]string, 0, limit)

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -34,6 +35,9 @@ type Handler struct {
 	backfillState   string
 	lastErr         string
 	host            sdk.Host
+	coordLocks      [64]sync.Mutex
+	periodicOnce    sync.Once
+	liveCursor      string
 
 	backfillGen     atomic.Int64
 	backfillScanned atomic.Int64
@@ -59,6 +63,7 @@ func (h *Handler) Handshake(ctx context.Context, settings json.RawMessage) (*sdk
 	if err := h.apply(ctx, settings, true); err != nil {
 		return nil, err
 	}
+	h.startPeriodic(context.WithoutCancel(ctx))
 	h.startBackfill(context.WithoutCancel(ctx))
 	h.mu.RLock()
 	st := h.settings
@@ -98,15 +103,17 @@ func (h *Handler) OnStoredEvent(ctx context.Context, ev sdk.Event, stored bool) 
 	store := h.store
 	h.mu.RUnlock()
 	if store == nil {
-		return nil
+		err := fmt.Errorf("index store unavailable")
+		h.backfillGen.Add(1)
+		h.setBackfill("error: " + err.Error())
+		return err
 	}
-	l, ok := listing.FromEvent(listing.Event{
-		ID: ev.ID, PubKey: ev.PubKey, CreatedAt: ev.CreatedAt, Kind: ev.Kind, Tags: ev.Tags, Content: ev.Content,
-	}, st.IndexDrafts)
-	if !ok {
-		return nil
+	if err := h.reconcileHint(ctx, ev, st, store); err != nil {
+		h.backfillGen.Add(1)
+		h.setBackfill("error: " + err.Error())
+		return err
 	}
-	return store.Upsert(ctx, l)
+	return nil
 }
 
 func (h *Handler) InterceptREQ(ctx context.Context, req sdk.Req) (*sdk.InterceptResult, error) {
@@ -180,15 +187,17 @@ func (h *Handler) AdminAction(ctx context.Context, name string, payload json.Raw
 	case "rebuild":
 		h.mu.Lock()
 		store := h.store
+		if store == nil {
+			h.mu.Unlock()
+			return json.Marshal(map[string]any{"ok": false, "error": "store not open"})
+		}
 		h.backfillStarted = false
 		h.backfillState = "running"
+		h.ready = false
 		h.mu.Unlock()
 		h.backfillScanned.Store(0)
 		h.backfillIndexed.Store(0)
 		gen := h.backfillGen.Add(1)
-		if store != nil {
-			_ = store.SetMeta(ctx, metaWatermark, "")
-		}
 		h.startBackfill(context.WithoutCancel(ctx))
 		return json.Marshal(map[string]any{"ok": true, "generation": gen})
 	case "test_store":
@@ -269,9 +278,6 @@ func (h *Handler) apply(ctx context.Context, raw json.RawMessage, opening bool) 
 	if err != nil {
 		return err
 	}
-	h.mu.RLock()
-	old := h.settings
-	h.mu.RUnlock()
 	sec, _ := loadSecretsFile(h.dataDir)
 	if st.PostgresPassword != "" {
 		sec.PostgresPassword = st.PostgresPassword
@@ -312,6 +318,8 @@ func (h *Handler) apply(ctx context.Context, raw json.RawMessage, opening bool) 
 		return err
 	}
 	h.mu.Lock()
+	h.backfillGen.Add(1)
+	h.backfillStarted = false
 	if h.store != nil {
 		_ = h.store.Close()
 	}
@@ -319,7 +327,8 @@ func (h *Handler) apply(ctx context.Context, raw json.RawMessage, opening bool) 
 	h.settings = st
 	h.storeOpen = true
 	h.embedWarm = e != nil
-	h.ready = true
+	h.ready = false
+	h.backfillState = "running"
 	h.lastErr = ""
 	h.mu.Unlock()
 	keep := listing.DefaultStallKinds()
@@ -327,18 +336,10 @@ func (h *Handler) apply(ctx context.Context, raw json.RawMessage, opening bool) 
 	keep = append(keep, listing.DefaultDraftKinds()...)
 	keep = append(keep, listing.DefaultDeletionKinds()...)
 	if err := store.PurgeKindsNotIn(ctx, keep); err != nil {
-		h.log(ctx, "warn", "purge non-marketplace kinds", map[string]string{"error": err.Error()})
+		h.setBackfill("error: " + err.Error())
+		return err
 	}
-	reembed := !opening && (old.EmbedDim != st.EmbedDim ||
-		old.EmbedProvider != st.EmbedProvider ||
-		old.EmbedHTTPURL != st.EmbedHTTPURL ||
-		old.EmbedHTTPModel != st.EmbedHTTPModel ||
-		old.EmbedModelURL != st.EmbedModelURL)
-	if reembed {
-		_ = store.SetMeta(ctx, metaWatermark, "")
-		h.mu.Lock()
-		h.backfillStarted = false
-		h.mu.Unlock()
+	if !opening {
 		h.startBackfill(context.WithoutCancel(ctx))
 	}
 	if e == nil {

@@ -85,7 +85,11 @@ type EmbeddingPage struct {
 // Store is the only persistence API.
 type Store interface {
 	Upsert(ctx context.Context, l listing.Listing) error
+	ReplaceCanonical(ctx context.Context, l listing.Listing) error
 	MarkInactive(ctx context.Context, pubkey string, eventIDs, coords []string) error
+	DeleteCoord(ctx context.Context, coord string) error
+	CoordsForEventIDs(ctx context.Context, pubkey string, eventIDs []string) ([]string, error)
+	CoordsAfter(ctx context.Context, after string, limit int) ([]string, error)
 	Get(ctx context.Context, coord string) (listing.Listing, bool, error)
 	Search(ctx context.Context, q Query) ([]string, error)
 	ListListings(ctx context.Context, q ListQuery) (ListingPage, error)
