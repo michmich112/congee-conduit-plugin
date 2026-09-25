@@ -25,7 +25,9 @@ export function defaultSettings() {
 		inject_product_kinds_on_search: false,
 		max_results: 0,
 		geo_min_prefix_len: 2,
-		search_candidate_cap: 2000
+		search_candidate_cap: 1000,
+		nip85_provider_pubkey: '78ed0837eba0ba244384195ce41d2a21575476a8e99e43f02d6e9729860e29e6',
+		nip85_max_age_days: 14
 	};
 }
 

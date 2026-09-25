@@ -65,6 +65,33 @@
 		</label>
 	</div>
 
+	<div class="space-y-3 rounded-lg border border-neutral-200 p-4 dark:border-neutral-800">
+		<div>
+			<h3 class="text-sm font-medium text-neutral-900 dark:text-neutral-100">Merchant trust signal</h3>
+			<p class="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+				A current NIP-85 rank can modestly improve product ordering. Merchants without one remain searchable. Congee must sync the provider's signed assertions separately.
+			</p>
+		</div>
+		<label class="block space-y-1">
+			<InfoLabel text="NIP-85 provider pubkey" tip="The signer of kind 30382 rank assertions. Clear this field to disable the trust signal. The default is the published Brainstorm perspective selected for Conduit." />
+			<input
+				class="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 font-mono text-xs text-neutral-900 outline-none focus:ring-2 focus:ring-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-100"
+				type="text"
+				spellcheck="false"
+				bind:value={settings.nip85_provider_pubkey}
+			/>
+		</label>
+		<label class="block space-y-1 sm:max-w-xs">
+			<InfoLabel text="Maximum assertion age (days)" tip="Older assertions are ignored in search. This is based on the signed event timestamp." />
+			<input
+				class="w-full rounded-lg border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none focus:ring-2 focus:ring-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-100"
+				type="number"
+				min="1"
+				bind:value={settings.nip85_max_age_days}
+			/>
+		</label>
+	</div>
+
 	<div>
 		<button
 			class="text-sm font-medium text-neutral-600 underline-offset-2 hover:underline dark:text-neutral-300"

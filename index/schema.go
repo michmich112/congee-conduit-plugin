@@ -32,10 +32,21 @@ CREATE TABLE IF NOT EXISTS index_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nip85_user_ranks (
+  provider TEXT NOT NULL,
+  target TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  rank INTEGER NOT NULL,
+  PRIMARY KEY (provider, target)
+);
 CREATE INDEX IF NOT EXISTS listings_status_kind ON listings(status, kind);
 CREATE INDEX IF NOT EXISTS listings_pubkey ON listings(pubkey);
 CREATE INDEX IF NOT EXISTS listings_event_id ON listings(event_id);
 CREATE INDEX IF NOT EXISTS listing_geo_geohash ON listing_geo(geohash);
+CREATE VIRTUAL TABLE IF NOT EXISTS listings_fts USING fts5(
+  title, body, content='listings', content_rowid='rowid', tokenize='unicode61'
+);
 `
 
 const pgSchemaSQL = `
@@ -70,8 +81,20 @@ CREATE TABLE IF NOT EXISTS index_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nip85_user_ranks (
+  provider TEXT NOT NULL,
+  target TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  rank INTEGER NOT NULL,
+  PRIMARY KEY (provider, target)
+);
 CREATE INDEX IF NOT EXISTS listings_status_kind ON listings(status, kind);
 CREATE INDEX IF NOT EXISTS listings_pubkey ON listings(pubkey);
 CREATE INDEX IF NOT EXISTS listings_event_id ON listings(event_id);
 CREATE INDEX IF NOT EXISTS listing_geo_geohash ON listing_geo(geohash);
+CREATE INDEX IF NOT EXISTS listings_search_document ON listings USING GIN ((
+  setweight(to_tsvector('simple', COALESCE(title, '')), 'A') ||
+  setweight(to_tsvector('simple', COALESCE(body, '')), 'B')
+));
 `
