@@ -25,3 +25,5 @@ require (
 	google.golang.org/grpc v1.75.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
+
+replace github.com/michmich112/congee/sdk/plugin => github.com/ericfj2140/congee/sdk/plugin v0.1.1-0.20260930201653-c3886ada51dd

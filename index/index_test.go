@@ -2,14 +2,83 @@ package index
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/michmich112/conduit-plugin/embed"
 	"github.com/michmich112/conduit-plugin/listing"
 )
 
+type failOnText struct{ embed.Fake }
+
+func (f failOnText) Embed(ctx context.Context, text string) ([]float32, error) {
+	if strings.Contains(text, "embed-fails") {
+		return nil, errors.New("embedding unavailable")
+	}
+	return f.Fake.Embed(ctx, text)
+}
+
 const pk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestRevisionOrderAndAtomicEmbeddingFailure(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenTurso(ctx, filepath.Join(t.TempDir(), "index.db"), failOnText{Fake: embed.Fake{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	makeListing := func(id, body string, at int64) listing.Listing {
+		t.Helper()
+		l, ok := listing.FromEvent(listing.Event{ID: id, PubKey: pk, Kind: listing.KindClassified,
+			CreatedAt: at, Content: body, Tags: [][]string{{"d", "bike"}, {"title", "Bicycle"}}}, false)
+		if !ok {
+			t.Fatal("listing parse")
+		}
+		return l
+	}
+	a := makeListing("bbbb", "original bicycle", 10)
+	if err := st.Upsert(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Upsert(ctx, makeListing("cccc", "losing tie", 10)); err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err := st.Get(ctx, a.Coord)
+	if err != nil || !ok || row.EventID != a.EventID {
+		t.Fatalf("higher equal-time ID displaced winner: %+v %v %v", row, ok, err)
+	}
+	b := makeListing("aaaa", "winning bicycle", 10)
+	if err := st.Upsert(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err = st.Get(ctx, a.Coord)
+	if err != nil || !ok || row.EventID != b.EventID {
+		t.Fatalf("lower equal-time ID did not win: %+v %v %v", row, ok, err)
+	}
+	if err := st.Upsert(ctx, makeListing("dddd", "embed-fails", 11)); err == nil {
+		t.Fatal("expected embedding failure")
+	}
+	row, ok, err = st.Get(ctx, a.Coord)
+	if err != nil || !ok || row.EventID != b.EventID {
+		t.Fatalf("failed embedding partly changed listing: %+v %v %v", row, ok, err)
+	}
+	page, err := st.ListEmbeddings(ctx, ListQuery{Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].EventID != b.EventID {
+		t.Fatalf("failed embedding changed vector identity: %+v %v", page, err)
+	}
+	items := st.(*sqlStore).ann.Snapshot(nil)
+	if len(items) != 1 || items[0].EventID != b.EventID {
+		t.Fatalf("ANN identity after revision: %+v", items)
+	}
+	if err := st.DeleteCoord(ctx, b.Coord); err != nil {
+		t.Fatal(err)
+	}
+	if items := st.(*sqlStore).ann.Snapshot(nil); len(items) != 0 {
+		t.Fatalf("deleted coordinate still in ANN: %+v", items)
+	}
+}
 
 func TestTursoSearchRankAndInactive(t *testing.T) {
 	ctx := context.Background()

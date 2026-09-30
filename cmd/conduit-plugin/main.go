@@ -59,7 +59,9 @@ func main() {
 	h := handler.New(dataDir, sel)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	if err := sdk.Serve(ctx, h); err != nil && ctx.Err() == nil {
+	err := sdk.Serve(ctx, h)
+	_ = h.Close()
+	if err != nil && ctx.Err() == nil {
 		os.Exit(1)
 	}
 }

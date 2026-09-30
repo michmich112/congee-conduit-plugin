@@ -25,7 +25,10 @@ func searchSQL(ctx context.Context, s *sqlStore, q Query) ([]string, error) {
 	needGeoJoin := q.GeoEnabled && len(q.GeoPrefixes) > 0
 	sortByProximity := needGeoJoin && !wantSearch
 
-	where := []string{"1=1"}
+	where := []string{
+		"NOT EXISTS (SELECT 1 FROM reconcile_jobs j WHERE j.coord = l.coord)",
+		"NOT EXISTS (SELECT 1 FROM reconcile_jobs j WHERE j.coord = '' AND j.author = l.pubkey AND j.kind = l.kind)",
+	}
 	args := []any{}
 	n := 1
 	add := func(cond string, v ...any) {
@@ -162,6 +165,15 @@ func searchSQL(ctx context.Context, s *sqlStore, q Query) ([]string, error) {
 		return nil, err
 	}
 	items := s.ann.Snapshot(coordSet)
+	// The SQL row is authoritative while an index update is between commit and
+	// refreshing the in-memory vector. Never return an old event ID from ANN.
+	current := items[:0]
+	for _, it := range items {
+		if row, ok := coordSet[it.Coord]; ok && row.EventID == it.EventID {
+			current = append(current, it)
+		}
+	}
+	items = current
 	if len(items) == 0 {
 		// no vectors yet; newest-first fallback
 		ids := make([]string, 0, limit)

@@ -9,7 +9,19 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: conduit
+          POSTGRES_PASSWORD: conduit
+          POSTGRES_DB: conduit_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U conduit"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      TEST_POSTGRES_DSN: postgres://conduit:conduit@127.0.0.1:5432/conduit_test?sslmode=disable
       GOPROXY: https://proxy.golang.org,direct
       GONOSUMDB: github.com/michmich112/congee
     steps:
@@ -19,6 +31,8 @@ jobs:
           go-version: "1.24.x"
           cache-dependency-path: go.sum
       - run: CGO_ENABLED=1 go test ./...
+      - run: CGO_ENABLED=1 go test -race ./handler ./index
+      - run: go vet ./...
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -32,3 +46,29 @@ jobs:
           npx playwright install --with-deps chromium
           npm run test:sandbox
         working-directory: web
+
+  congee-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.x"
+          cache-dependency-path: go.sum
+      - run: CGO_ENABLED=1 go build -o "$RUNNER_TEMP/conduit-plugin" ./cmd/conduit-plugin
+      - uses: actions/checkout@v6
+        with:
+          repository: ericfj2140/congee
+          ref: f1cc5e4be8c6d685877d1aed7fe858ccbe443e0b
+          path: congee-host
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/congee/turso-fts/target
+          key: turso-fts-36da5b2e-${{ runner.os }}-${{ runner.arch }}
+      - run: go mod download && ./scripts/overlay-turso-fts.sh
+        working-directory: congee-host
+      - run: CGO_ENABLED=1 go test -race ./internal/plugin -run '^TestEventPageCanonicalStorageGRPC$|^TestConduitCanonicalReconciliation$' -count=1
+        working-directory: congee-host
+        env:
+          CONDUIT_PLUGIN_TEST_BINARY: ${{ runner.temp }}/conduit-plugin
