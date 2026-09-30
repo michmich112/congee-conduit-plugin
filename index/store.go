@@ -7,6 +7,7 @@ import (
 
 	"github.com/michmich112/conduit-plugin/embed"
 	"github.com/michmich112/conduit-plugin/listing"
+	"github.com/michmich112/conduit-plugin/nip85"
 )
 
 // Query is the search planner input.
@@ -23,15 +24,24 @@ type Query struct {
 	ActiveOnly         bool
 	VectorEnabled      bool
 	GeoEnabled         bool
+	NIP85Provider      string
+	NIP85MaxAgeDays    int
 }
 
 // Stats is Overview UI counts.
 type Stats struct {
-	Active            int64  `json:"active"`
-	Inactive          int64  `json:"inactive"`
-	Embeddings        int64  `json:"embeddings"`
-	EmbeddingMismatch int64  `json:"embedding_mismatch"`
-	Backend           string `json:"backend"`
+	Active                int64  `json:"active"`
+	Inactive              int64  `json:"inactive"`
+	Embeddings            int64  `json:"embeddings"`
+	EmbeddingMismatch     int64  `json:"embedding_mismatch"`
+	Backend               string `json:"backend"`
+	SearchTotal           uint64 `json:"search_total"`
+	SearchErrors          uint64 `json:"search_errors"`
+	SearchOver200ms       uint64 `json:"search_over_200ms"`
+	SearchSemantic        uint64 `json:"search_semantic"`
+	SearchLexicalFallback uint64 `json:"search_lexical_fallback"`
+	NIP85Assertions       int64  `json:"nip85_assertions"`
+	NIP85ReadErrors       uint64 `json:"nip85_read_errors"`
 }
 
 // ListQuery pages through stored listings or embeddings.
@@ -85,6 +95,9 @@ type EmbeddingPage struct {
 // Store is the only persistence API.
 type Store interface {
 	Upsert(ctx context.Context, l listing.Listing) error
+	UpsertUserRank(ctx context.Context, rank nip85.UserRank) error
+	MerchantPubkeys(ctx context.Context) ([]string, error)
+	HasActiveMerchant(ctx context.Context, pubkey string) (bool, error)
 	MarkInactive(ctx context.Context, pubkey string, eventIDs, coords []string) error
 	Get(ctx context.Context, coord string) (listing.Listing, bool, error)
 	Search(ctx context.Context, q Query) ([]string, error)

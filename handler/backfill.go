@@ -94,6 +94,7 @@ func (h *Handler) runBackfill(ctx context.Context) {
 	}
 	if h.backfillGen.Load() == myGen {
 		h.setBackfill("complete")
+		h.startRankBackfill(ctx)
 	}
 }
 

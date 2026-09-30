@@ -10,6 +10,7 @@ import (
 	"github.com/michmich112/conduit-plugin/embed"
 	"github.com/michmich112/conduit-plugin/kinds"
 	"github.com/michmich112/conduit-plugin/listing"
+	"github.com/michmich112/conduit-plugin/nip85"
 	sdk "github.com/michmich112/congee/sdk/plugin"
 )
 
@@ -39,7 +40,11 @@ type Settings struct {
 	MaxResults                 int    `json:"max_results"`
 	GeoMinPrefixLen            int    `json:"geo_min_prefix_len"`
 	SearchCandidateCap         int    `json:"search_candidate_cap"`
+	NIP85ProviderPubkey        string `json:"nip85_provider_pubkey"`
+	NIP85MaxAgeDays            int    `json:"nip85_max_age_days"`
 }
+
+const defaultNIP85Provider = "78ed0837eba0ba244384195ce41d2a21575476a8e99e43f02d6e9729860e29e6"
 
 func defaultSettings() Settings {
 	return Settings{
@@ -55,7 +60,9 @@ func defaultSettings() Settings {
 		ActiveFilter:               true,
 		MaxResults:                 0,
 		GeoMinPrefixLen:            2,
-		SearchCandidateCap:         2000,
+		SearchCandidateCap:         1000,
+		NIP85ProviderPubkey:        defaultNIP85Provider,
+		NIP85MaxAgeDays:            14,
 		InjectProductKindsOnSearch: false,
 	}
 }
@@ -99,7 +106,14 @@ func parseSettings(raw json.RawMessage) (Settings, error) {
 		s.GeoMinPrefixLen = 2
 	}
 	if s.SearchCandidateCap <= 0 {
-		s.SearchCandidateCap = 2000
+		s.SearchCandidateCap = 1000
+	}
+	s.NIP85ProviderPubkey = strings.ToLower(strings.TrimSpace(s.NIP85ProviderPubkey))
+	if s.NIP85ProviderPubkey != "" && !nip85.ValidPubkey(s.NIP85ProviderPubkey) {
+		return s, fmt.Errorf("settings: nip85_provider_pubkey must be a 64-character hex pubkey or empty")
+	}
+	if s.NIP85MaxAgeDays <= 0 {
+		s.NIP85MaxAgeDays = 14
 	}
 	if len(s.ProductKinds) == 0 {
 		s.ProductKinds = listing.DefaultProductKinds()
@@ -191,8 +205,12 @@ func keepKindsWithAnyRole(in []int, roles ...string) []int {
 }
 
 func subscriptionsFor(s Settings) []sdk.TrafficSubscription {
+	storedKinds := s.allIndexKinds()
+	if s.NIP85ProviderPubkey != "" {
+		storedKinds = append(storedKinds, nip85.KindUserAssertion)
+	}
 	return []sdk.TrafficSubscription{
-		{Kinds: s.allIndexKinds(), OnStoredEvent: true},
+		{Kinds: storedKinds, OnStoredEvent: true},
 		{
 			MessageTypes: []string{"REQ"},
 			Kinds:        s.ProductKinds,

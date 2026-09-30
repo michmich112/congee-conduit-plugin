@@ -22,13 +22,24 @@ type decision struct {
 }
 
 func decide(req sdk.Req, st Settings, ready bool) decision {
-	if !ready {
+	// The index answers one filter at a time. Let Congee handle OR filters and
+	// constraints that the index cannot enforce rather than returning a partial
+	// or over-broad result set.
+	if !ready || len(req.Filters) != 1 {
 		return decision{kind: decPassthrough}
 	}
 	product := toSet(st.ProductKinds)
 	stall := toSet(st.StallKinds)
 
 	for _, f := range req.Filters {
+		if len(f.IDs) != 0 {
+			return decision{kind: decPassthrough}
+		}
+		for name := range f.Tags {
+			if !st.GeoEnabled || strings.TrimPrefix(name, "#") != "g" {
+				return decision{kind: decPassthrough}
+			}
+		}
 		hasSearch := strings.TrimSpace(f.Search) != ""
 		hasGeo := false
 		if st.GeoEnabled {
@@ -42,16 +53,14 @@ func decide(req sdk.Req, st Settings, ready bool) decision {
 		}
 		kindsEmpty := len(f.Kinds) == 0
 		hitsProduct := false
-		hitsStall := false
 		for _, k := range f.Kinds {
 			if product[k] {
 				hitsProduct = true
 			}
-			if stall[k] {
-				hitsStall = true
+			if !product[k] && !stall[k] {
+				return decision{kind: decPassthrough}
 			}
 		}
-		_ = hitsStall
 
 		if hasSearch && kindsEmpty && st.InjectProductKindsOnSearch {
 			nf := cloneFilter(f)
@@ -90,16 +99,6 @@ func cloneFilter(f sdk.Filter) sdk.Filter {
 		for k, v := range f.Tags {
 			out.Tags[k] = append([]string(nil), v...)
 		}
-	}
-	return out
-}
-
-func stripSearch(filters []sdk.Filter) []sdk.Filter {
-	out := make([]sdk.Filter, len(filters))
-	for i, f := range filters {
-		nf := cloneFilter(f)
-		nf.Search = ""
-		out[i] = nf
 	}
 	return out
 }
