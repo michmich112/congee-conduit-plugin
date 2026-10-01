@@ -55,7 +55,7 @@ func defaultSettings() Settings {
 		ActiveFilter:               true,
 		MaxResults:                 0,
 		GeoMinPrefixLen:            2,
-		SearchCandidateCap:         2000,
+		SearchCandidateCap:         1000,
 		InjectProductKindsOnSearch: false,
 	}
 }
@@ -99,7 +99,7 @@ func parseSettings(raw json.RawMessage) (Settings, error) {
 		s.GeoMinPrefixLen = 2
 	}
 	if s.SearchCandidateCap <= 0 {
-		s.SearchCandidateCap = 2000
+		s.SearchCandidateCap = 1000
 	}
 	if len(s.ProductKinds) == 0 {
 		s.ProductKinds = listing.DefaultProductKinds()

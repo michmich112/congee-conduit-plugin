@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -17,17 +19,25 @@ import (
 )
 
 type sqlStore struct {
-	db       *sql.DB
-	pool     *pgxpool.Pool
-	backend  string
-	ph       func(n int) string
-	embedder embed.Embedder
-	ann      *ANN
-	qcache   *queryCache
-	writeMu  sync.Mutex
+	db                    *sql.DB
+	pool                  *pgxpool.Pool
+	backend               string
+	ph                    func(n int) string
+	embedder              embed.Embedder
+	ann                   *ANN
+	qcache                *queryCache
+	writeMu               sync.Mutex
+	searchTotal           atomic.Uint64
+	searchErrors          atomic.Uint64
+	searchOver200ms       atomic.Uint64
+	searchSemantic        atomic.Uint64
+	searchLexicalFallback atomic.Uint64
 }
 
-// OpenTurso opens a single-writer libSQL file at path (MaxOpenConns=1).
+const tursoMaxOpenConns = 8
+
+// OpenTurso opens a WAL-backed libSQL file with serialized writes and a
+// bounded pool of concurrent reader connections.
 func OpenTurso(ctx context.Context, path string, e embed.Embedder) (Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && !os.IsExist(err) {
 		if filepath.Dir(path) != "." {
@@ -64,6 +74,14 @@ func OpenTurso(ctx context.Context, path string, e embed.Embedder) (Store, error
 		_ = db.Close()
 		return nil, err
 	}
+	if err := initSQLiteFTS(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := configureTursoPool(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	s := &sqlStore{
 		db:       db,
 		backend:  "turso",
@@ -77,6 +95,37 @@ func OpenTurso(ctx context.Context, path string, e embed.Embedder) (Store, error
 		return nil, err
 	}
 	return s, nil
+}
+
+// SQLite's WAL mode is persistent for the database, while busy_timeout and
+// foreign_keys are per connection. Hold each connection while configuring it
+// so database/sql opens all eight rather than reusing one idle connection.
+func configureTursoPool(ctx context.Context, db *sql.DB) error {
+	db.SetMaxOpenConns(tursoMaxOpenConns)
+	db.SetMaxIdleConns(tursoMaxOpenConns)
+	connections := make([]*sql.Conn, 0, tursoMaxOpenConns)
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+	for i := 0; i < tursoMaxOpenConns; i++ {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		connections = append(connections, conn)
+		for _, pragma := range []string{`PRAGMA busy_timeout = 5000`, `PRAGMA foreign_keys = ON`} {
+			rows, err := conn.QueryContext(ctx, pragma)
+			if err != nil {
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // OpenPostgres opens a pgx pool. vector column is BYTEA (pgvector optional later).
@@ -315,6 +364,11 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 
 func (s *sqlStore) Stats(ctx context.Context) (Stats, error) {
 	st := Stats{Backend: s.backend}
+	st.SearchTotal = s.searchTotal.Load()
+	st.SearchErrors = s.searchErrors.Load()
+	st.SearchOver200ms = s.searchOver200ms.Load()
+	st.SearchSemantic = s.searchSemantic.Load()
+	st.SearchLexicalFallback = s.searchLexicalFallback.Load()
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM listings WHERE status = 'active'`).Scan(&st.Active)
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM listings WHERE status != 'active'`).Scan(&st.Inactive)
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM listing_embeddings`).Scan(&st.Embeddings)
@@ -410,7 +464,16 @@ func nullStr(s string) any {
 }
 
 func (s *sqlStore) Search(ctx context.Context, q Query) ([]string, error) {
-	return searchSQL(ctx, s, q)
+	start := time.Now()
+	ids, err := searchSQL(ctx, s, q)
+	s.searchTotal.Add(1)
+	if err != nil {
+		s.searchErrors.Add(1)
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		s.searchOver200ms.Add(1)
+	}
+	return ids, err
 }
 
 type queryCache struct {

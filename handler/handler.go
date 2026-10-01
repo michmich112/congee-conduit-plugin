@@ -133,6 +133,12 @@ func (h *Handler) InterceptREQ(ctx context.Context, req sdk.Req) (*sdk.Intercept
 	if len(req.Filters) > 0 {
 		f = req.Filters[0]
 	}
+	// NIP-01 limit 0 asks for no stored events; clampLimit treats zero as a
+	// default, so answer the empty snapshot before entering the index.
+	if f.Limit != nil && *f.Limit == 0 {
+		h.respondN.Add(1)
+		return &sdk.InterceptResult{Action: sdk.InterceptRespond}, nil
+	}
 	q := index.Query{
 		Search:             f.Search,
 		Kinds:              kindsForSearch(f, st),
@@ -159,9 +165,8 @@ func (h *Handler) InterceptREQ(ctx context.Context, req sdk.Req) (*sdk.Intercept
 	}
 	h.respondN.Add(1)
 	return &sdk.InterceptResult{
-		Action:              sdk.InterceptRespond,
-		EventIDs:            ids,
-		SubscriptionFilters: stripSearch(req.Filters),
+		Action:   sdk.InterceptRespond,
+		EventIDs: ids,
 	}, nil
 }
 
@@ -233,21 +238,26 @@ func (h *Handler) Status(ctx context.Context) (*sdk.Status, error) {
 		}
 	}
 	body, _ := json.Marshal(map[string]any{
-		"backend":             stats.Backend,
-		"active":              stats.Active,
-		"inactive":            stats.Inactive,
-		"embeddings":          stats.Embeddings,
-		"embedding_mismatch":  stats.EmbeddingMismatch,
-		"backfill":            bf,
-		"backfill_generation": h.backfillGen.Load(),
-		"backfill_scanned":    h.backfillScanned.Load(),
-		"backfill_indexed":    h.backfillIndexed.Load(),
-		"intercept_n":         h.interceptN.Load(),
-		"passthrough_n":       h.passthroughN.Load(),
-		"respond_n":           h.respondN.Load(),
-		"reshape_n":           h.reshapeN.Load(),
-		"settings":            st.redacted(),
-		"assets":              embed.InspectAssets(h.dataDir),
+		"backend":                 stats.Backend,
+		"active":                  stats.Active,
+		"inactive":                stats.Inactive,
+		"embeddings":              stats.Embeddings,
+		"embedding_mismatch":      stats.EmbeddingMismatch,
+		"search_total":            stats.SearchTotal,
+		"search_errors":           stats.SearchErrors,
+		"search_over_200ms":       stats.SearchOver200ms,
+		"search_semantic":         stats.SearchSemantic,
+		"search_lexical_fallback": stats.SearchLexicalFallback,
+		"backfill":                bf,
+		"backfill_generation":     h.backfillGen.Load(),
+		"backfill_scanned":        h.backfillScanned.Load(),
+		"backfill_indexed":        h.backfillIndexed.Load(),
+		"intercept_n":             h.interceptN.Load(),
+		"passthrough_n":           h.passthroughN.Load(),
+		"respond_n":               h.respondN.Load(),
+		"reshape_n":               h.reshapeN.Load(),
+		"settings":                st.redacted(),
+		"assets":                  embed.InspectAssets(h.dataDir),
 		"embedder": map[string]any{
 			"model_id":       sel.ModelID,
 			"source":         sel.Source,
